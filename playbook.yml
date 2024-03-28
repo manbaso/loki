@@ -1,0 +1,140 @@
+---
+
+- hosts: localhost
+  become: yes
+  gather_facts: false
+  vars:
+    servers:
+    - ip_address: "{{ hostvars[inventory_hostname]['loki_hosts'][0] }}"
+      port: 3100
+      host: "{{ hostvars[inventory_hostname]['promtail_hosts'][0] }}"
+      desti: config1.yml
+    - ip_address: "{{ hostvars[inventory_hostname]['loki_hosts'][0] }}"
+      port: 3100
+      host: "{{ hostvars[inventory_hostname]['promtail_hosts'][1] }}"
+      desti: config2.yml
+     
+
+
+  tasks:
+    - name: Get hosts of promtail group
+      set_fact:
+        promtail_hosts: "{{ groups['promtail'] }}"
+      run_once: true 
+    - name: Get hosts of promtail group
+      set_fact:
+        loki_hosts: "{{ groups['loki'] }}"
+      run_once: true   
+    - name: Generate promtail configuration files
+      template:
+        src: server.j2
+        dest: "{{ item.desti }}"
+      with_items: "{{ servers }}"
+      vars:
+        ip_address: "{{ item.ip_address }}"
+        port: "{{ item.port }}"
+        # host: "{{ item.host }}"
+        # host: "{{ ansible_ssh_host }}"
+        host: "{{ item.host }}"
+        desti: "{{ item.desti }}"
+
+
+- hosts: loki
+  become: yes
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install snapd
+      apt:
+        name: snapd
+        state: present
+        update_cache: yes
+
+    - name: Install amazon-ssm-agent via snap
+      command: snap install amazon-ssm-agent --classic
+
+    - name: Start amazon-ssm-agent service
+      systemd:
+        name: snap.amazon-ssm-agent.amazon-ssm-agent
+        state: started
+        enabled: yes
+
+    - name: Install required packages
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - apt-transport-https
+        - software-properties-common
+        - wget
+
+    - name: Import Grafana GPG key
+      shell: wget -q -O - https://apt.grafana.com/gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/grafana.gpg
+
+    - name: Add Grafana repository to sources.list.d
+      shell: echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" | sudo tee -a /etc/apt/sources.list.d/grafana.list
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install promtail, loki, grafana
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - promtail
+        - loki
+        - grafana
+
+    - name: Start Grafana service
+      systemd:
+        name: grafana-server
+        state: restarted
+        enabled: yes    
+   
+    
+- hosts: promtail
+  become: yes
+  vars:
+    first: "{{ hostvars[inventory_hostname]['promtail_hosts'][0] }}"
+    second: "{{ hostvars[inventory_hostname]['promtail_hosts'][1] }}"
+  tasks:
+    - name: Import Grafana GPG key
+      shell: wget -q -O - https://apt.grafana.com/gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/grafana.gpg
+
+    - name: Add Grafana repository to sources.list.d
+      shell: echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" | sudo tee -a /etc/apt/sources.list.d/grafana.list
+
+    - name: Update apt cache and install promtail
+      apt:
+        name: promtail
+        update_cache: yes
+        state: present
+    - name: Get hosts of promtail group
+      set_fact:
+        promtail_hosts: "{{ groups['promtail'] }}"
+      run_once: true 
+    - name: Get hosts of promtail group
+      set_fact:
+        loki_hosts: "{{ groups['loki'] }}"
+      run_once: true     
+
+    - name: Copy config.yml
+      copy:
+        src: config1.yml
+        dest: /etc/promtail/config.yml  
+      when: inventory_hostname == first   
+
+    - name: Copy config.yml
+      copy:
+        src: config2.yml
+        dest: /etc/promtail/config.yml 
+      when: inventory_hostname == second       
+
+    - name: Restart promtail service
+      systemd:
+        name: promtail
+        state: restarted
+    
